@@ -1,0 +1,23 @@
+{
+  "name": "puzzle",
+  "version": "1.0.0",
+  "description": "Puzzle to BTC Lottery",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FranklysG/puzzle.git"
+  },
+  "keywords": [
+    "puzzle",
+    "btc"
+  ],
+  "author": "FranklysG",
+  "bugs": {
+    "url": "https://github.com/FranklysG/puzzle/issues"
+  },
+  "homepage": "https://github.com/FranklysG/puzzle#readme",
+  "dependencies": {
+    "coinkey": "^3.0.0",
+    "fs": "^0.0.1-security"
+  }
+}
