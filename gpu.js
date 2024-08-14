@@ -18,6 +18,8 @@ const generatePublicKey = gpu.createKernel(function(pkey) {
   return key.publicAddress;
 }).setOutput([1]);
 
+console.log("Mode:", gpu.getMode());
+
 while (key <= max) {
   cont++;
   key += 1n;
