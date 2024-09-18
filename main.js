@@ -80,12 +80,13 @@ if (isMainThread) {
 
       if (cont % 1000 === 0) {
           // Envia a mensagem para ser logada na thread principal
+          console.clear();
           parentPort.postMessage(`Thread ${threadId}: ${pkey} ${public} ${Hs} (${percentageChecked}% verificado)`);
       }
 
       if (wallets.includes(public)) {
         const keyWif = generateWIF(pkey);
-        parentPort.postMessage(`Thread ${threadId}: Chave Encontrada: ${pkey} -> WIF: ${keyWif}`);
+        parentPort.postMessage(`Encontrada ${threadId}: ${pkey} -> WIF: ${keyWif} em (${percentageChecked}% range)`);
         process.exit();
       }
     }
