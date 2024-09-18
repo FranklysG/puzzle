@@ -3,14 +3,15 @@ const CoinKey = require('coinkey');
 const wallets = require('./utils/wallets');
 const ranges = require('./utils/ranges');
 
-const range = ranges[66]
+const range = ranges[67] // { min: 0x40000000000000000n, max: 0x7ffffffffffffffffn, status: 0, range: 67 }
 
 const min = range.min;
 const max = range.max;
+const start = min;
 
-let key = min;
-
+let key = start;
 let cont = 0;
+const totalKeys = max - min + 1n;
 const startTime = Date.now();
 
 while (key <= max) {
@@ -44,17 +45,20 @@ while (key <= max) {
   const pkey = key.toString(16).padStart(64, '0');
   const public = generatePublicKey(pkey);
   
-  console.log(`${pkey} ${public} ${Hs}`)
+  // Ajustando o cálculo de porcentagem
+  const percentageChecked = ((Number(key - min) / Number(totalKeys)) * 100).toFixed(2);
+
+  console.log(`${pkey} ${public} ${Hs} (${percentageChecked}% verificado)`);
 
   if (wallets.includes(public)) {
     console.log(`-----`);
     console.log(`Chave Encontrada`);
 
     const seconds = Math.floor(elapsedTime / 1000) % 60;
-    const minutes = Math.floor(seconds / 60);
-    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((elapsedTime / 1000) / 60) % 60;
+    const hours = Math.floor((elapsedTime / 1000) / 3600);
 
-    const keyWif = generateWIF(pkey)
+    const keyWif = generateWIF(pkey);
     console.log(`${pkey} ${public} ${hours}:${minutes}:${seconds}`);
     console.log(`Sua Electron Key: ${keyWif}`);
     console.log(`-----`);
@@ -62,7 +66,6 @@ while (key <= max) {
     break;
   }
 }
-
 
 function generatePublicKey(privatekey) {
   const key = new CoinKey(Buffer.from(privatekey, 'hex'));
@@ -76,4 +79,3 @@ function generateWIF(privateKey) {
 }
 
 console.log("Processo concluído.");
-

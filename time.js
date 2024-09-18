@@ -1,6 +1,6 @@
 const ranges = require('./utils/ranges');
 
-const range = ranges[66]
+const range = ranges[67]
 
 const min = range.min;
 const max = range.max;
@@ -25,18 +25,18 @@ function calculateTime(hashRate) {
     };
 }
 
-const hashRate = 3
+const hashRate = 1
 
 // Taxas de hash
 const rates = {
-    "1 kH/s": hashRate * 1e3,
-    "1 MH/s": hashRate * 1e6,
-    "1 GH/s": hashRate * 1e9,
-    "1 TH/s": hashRate * 1e12,
-    "1 PH/s": hashRate * 1e15,
-    "1 EH/s": hashRate * 1e18,
-    "1 ZH/s": hashRate * 1e21,
-    "1 YH/s": hashRate * 1e24,
+    [hashRate + " kH/s"]: hashRate * 1e3,
+    [hashRate + " MH/s"]: hashRate * 1e6,
+    [hashRate + " GH/s"]: hashRate * 1e9,
+    [hashRate + " TH/s"]: hashRate * 1e12,
+    [hashRate + " PH/s"]: hashRate * 1e15,
+    [hashRate + " EH/s"]: hashRate * 1e18,
+    [hashRate + " ZH/s"]: hashRate * 1e21,
+    [hashRate + " YH/s"]: hashRate * 1e24,
 };
 
 // Calcular e exibir o tempo necessário para cada taxa de hash
