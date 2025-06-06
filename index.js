@@ -48,6 +48,7 @@ while (key <= max) {
   // Ajustando o cálculo de porcentagem
   const percentageChecked = ((Number(key - min) / Number(totalKeys)) * 100).toFixed(2);
 
+  console.clear();
   console.log(`${pkey} ${public} ${Hs} (${percentageChecked}% verificado)`);
 
   if (wallets.includes(public)) {
