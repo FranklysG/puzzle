@@ -43,15 +43,13 @@ The base58 form of the *current* key is computed only every `LOG_EVERY` (5000) i
 
 Uses Node's `worker_threads` with `isMainThread` to fork the same file:
 
-- **Main thread**: reads CLI input, then dispatches per mode:
-  - **Sequential (`mode === 1`)**: splits `[min, max]` into `numThreads` equal `BigInt` chunks (last chunk absorbs the remainder).
-  - **Random (`mode === 2`)**: every thread receives the full `[min, max]` — collision is negligible at puzzle scale and aggregate coverage is better than partitioning.
+- **Main thread**: reads CLI input. **Both modes** split `[min, max]` into `numThreads` equal `BigInt` chunks (last chunk absorbs the remainder). The partition is required for the random mode's non-repetition guarantee — see worker section.
   
-  Spawns one `Worker` per slot with `{ start, end, threadId, mode }` via `workerData`. Maintains `threadLogs[]`; on each worker progress message it overwrites `threadLogs[threadId]` and reprints all rows in place via `process.stdout.write('\x1B[0;0H')` + `console.clear()`. On `found: true` it writes `new_million.txt` and `process.exit(0)`s the whole pool.
+  Spawns one `Worker` per chunk with `{ start, end, threadId, mode }` via `workerData`. Maintains `threadLogs[]`; on each worker progress message it overwrites `threadLogs[threadId]` and reprints all rows in place via `process.stdout.write('\x1B[0;0H')` + `console.clear()`. On `found: true` it writes `new_million.txt` and `process.exit(0)`s the whole pool.
 
 - **Worker thread**: runs inside an `async function runWorker()` (because `hash-wasm` constructors are async). Holds the current public-key point `pub` across iterations in one of two pre-allocated 33-byte `Uint8Array` slots (`pubBufA`/`pubBufB`), swapping them so that `tweakAdd`'s output buffer is always the *other* slot. Advances differently per mode:
   - **Sequential**: `secp.publicKeyTweakAdd(pub, ONE_BUF, true, pubAlt)` (EC point addition by `+G`) and `key += 1n`. Only re-derives via `publicKeyCreate(privBuf, true, pub)` on range wrap (`key > end → key = start`). The `privBuf` is incremented in-place at the LSB; on byte overflow (`privBuf[31] === 0`) it is rewritten from `key`.
-  - **Random**: a CSPRNG pool (`crypto.randomBytes(4096)`) is sliced into `rByteLen`-byte chunks, each masked at the top byte to the rangeSize bit-length and accepted if `< rangeSize` (rejection sampling — uniform in `[0, rangeSize)`). The full `publicKeyCreate(privBuf, true, pub)` runs every iteration since the key jumps arbitrarily.
+  - **Random**: an **LCG full-period permutation** of the chunk (`[0, rangeSize)`) using Hull-Dobell parameters: `M = next_pow_2(rangeSize)`, `A = floor(M·φ)` adjusted to `≡ 1 (mod 4)`, `C = (M/2) | 1`. Seed comes from `crypto.randomBytes(...)` per worker. State evolves as `state = (state · A + C) & (M - 1)`; if `state >= rangeSize` (only when chunk size isn't a power of 2), cycle-walks until in-range. Properties: covers the *entire chunk* with no repetition before cycling, in O(1) memory; threads partition the range so there is also zero cross-thread repetition. Distribution is uniform (~2.5% bucket spread, equivalent to CSPRNG). The full `publicKeyCreate(privBuf, true, pub)` runs every iteration since the key jumps arbitrarily.
   
   Posts a progress log every `LOG_EVERY` (5000) iterations using a `--ticksLeft` decrementing counter (cheaper than `cont % LOG_EVERY` in BigInt-heavy loops). Posts `{ found, threadId, privKey, wif, publicAddr }` and `break`s on a hit.
 
@@ -72,6 +70,6 @@ Stand-alone calculator: prints how long it would take to exhaust `ranges[67]` at
 - **`hash-wasm` instances are created once at worker startup** inside the `async runWorker()`. Reusing them via `init()/update()/digest()` is the whole reason they are faster than `node:crypto` here.
 - **`main.js` is both main and worker** in one file — guarded by `isMainThread`. New top-level code runs in *both* contexts; put main-only logic inside the `if (isMainThread)` branch and worker-only logic inside the `else`.
 - **Progress logging is throttled** in workers via `--ticksLeft` reset against `LOG_EVERY` (5000). Do not log on every iteration — `index.js` demonstrates how much that costs. The decrement-counter pattern is preferred over `cont % N` because the loop's other arithmetic is BigInt-heavy and a Number `%` on a BigInt-mixed counter introduces coercions.
-- **Random mode must use the CSPRNG pool + rejection sampling**, not `Math.random()`. The previous step-based scheme biased toward the start of the range and was correlated like an LCG.
+- **Random mode uses an LCG full-period permutation per thread, not independent CSPRNG samples.** This is the source of the no-repeat guarantee. Do not "improve" it back to independent draws — that loses the property without measurable benefit (LCG distribution spread is ~2.5%, identical to CSPRNG in practice). The Hull-Dobell parameters require `A ≡ 1 (mod 4)` and `C` odd; do not change them without re-running the coverage validation (a small-range run that confirms `seen.size === rangeSize` after `rangeSize` steps).
 - **Found-key output** goes to `new_million.txt` at the repo root via `fs.writeFileSync`. Verify before changing the filename — `.gitignore` references it.
 - All user-facing strings (prompts, logs) are in **Portuguese**. Match that tone when adding new ones.

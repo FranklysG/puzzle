@@ -76,27 +76,36 @@ async function runWorker() {
   const sha256Hw = await hashWasm.createSHA256();
   const rip160Hw = await hashWasm.createRIPEMD160();
 
-  const bitLen = rangeSize.toString(2).length;
-  const rByteLen = Math.ceil(bitLen / 8);
-  const topByteMask = bitLen % 8 === 0 ? 0xff : (1 << (bitLen % 8)) - 1;
-  const RAND_BATCH = 4096;
-  let randPool = crypto.randomBytes(RAND_BATCH);
-  let randPos = 0;
-
-  function nextRandomKey() {
-    while (true) {
-      if (randPos + rByteLen > RAND_BATCH) {
-        randPool = crypto.randomBytes(RAND_BATCH);
-        randPos = 0;
-      }
-      let r = BigInt(randPool[randPos] & topByteMask);
-      for (let j = 1; j < rByteLen; j++) r = (r << 8n) | BigInt(randPool[randPos + j]);
-      randPos += rByteLen;
-      if (r < rangeSize) return start + r;
-    }
+  // LCG full-period sobre [0, rangeSize): cada thread percorre seu chunk inteiro
+  // em ordem pseudo-aleatória, sem repetir, em O(1) memória. Hull-Dobell:
+  // - M = próxima potência de 2 ≥ rangeSize
+  // - A ≡ 1 (mod 4), próximo de M * φ (golden ratio)
+  // - C ímpar
+  // Quando rangeSize == M (puzzle ranges são potências de 2 e numThreads
+  // potência de 2 → chunkSize também), cycle walking nunca dispara.
+  const lcgBits = (rangeSize - 1n).toString(2).length;
+  const lcgM = 1n << BigInt(lcgBits);
+  const lcgMask = lcgM - 1n;
+  let lcgA = (lcgM * 6180339887498948482n) / 10000000000000000000n;
+  lcgA = (lcgA & ~3n) | 1n;
+  const lcgC = (lcgM / 2n) | 1n;
+  let lcgState;
+  {
+    const seedBytes = crypto.randomBytes(Math.ceil(lcgBits / 8));
+    let s = 0n;
+    for (const b of seedBytes) s = (s << 8n) | BigInt(b);
+    lcgState = s & lcgMask;
+    if (lcgState >= rangeSize) lcgState %= rangeSize;
   }
 
-  if (mode === 2) key = nextRandomKey();
+  function nextLcgKey() {
+    do {
+      lcgState = (lcgState * lcgA + lcgC) & lcgMask;
+    } while (lcgState >= rangeSize);
+    return start + lcgState;
+  }
+
+  if (mode === 2) key = nextLcgKey();
   writeBigInt32BE(key, privBuf);
   let pub = secp.publicKeyCreate(privBuf, true, pubBufA);
   let pubAlt = pubBufB;
@@ -156,8 +165,8 @@ async function runWorker() {
         pub = next;
       }
     } else {
-      // Aleatório: chave totalmente nova uniforme em [start,end] via CSPRNG
-      key = nextRandomKey();
+      // Aleatório: próxima chave do LCG full-period (sem repetição no chunk)
+      key = nextLcgKey();
       writeBigInt32BE(key, privBuf);
       pub = secp.publicKeyCreate(privBuf, true, pub);
     }
@@ -187,16 +196,10 @@ function startWorkers(puzzleNumber, mode, numThreads) {
   }
 
   for (let i = 0; i < numThreads; i++) {
-    let start, end;
-    if (mode === 1) {
-      start = min + BigInt(i) * baseChunkSize;
-      end = i === numThreads - 1 ? max : start + baseChunkSize - 1n;
-    } else {
-      // Aleatório: cada thread amostra o range inteiro (cobertura agregada melhor;
-      // colisão entre threads é desprezível em ranges grandes)
-      start = min;
-      end = max;
-    }
+    // Particiona em ambos os modos: no random, cada thread cobre seu chunk via LCG
+    // full-period — garantia de zero repetição intra e inter-thread.
+    const start = min + BigInt(i) * baseChunkSize;
+    const end = i === numThreads - 1 ? max : start + baseChunkSize - 1n;
 
     const worker = new Worker(__filename, {
       workerData: { start, end, threadId: i, mode },
