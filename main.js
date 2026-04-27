@@ -3,11 +3,14 @@ const os = require('os');
 const crypto = require('crypto');
 const secp = require('secp256k1');
 const bs58check = require('bs58check').default;
+const hashWasm = require('hash-wasm');
 const readline = require('readline');
 const fs = require('fs');
 
 const wallets = require('./utils/wallets'); // Set de hash160 hex
 const ranges = require('./utils/ranges');   // Ranges por puzzle
+
+const LOG_EVERY = 5000;
 
 let threadLogs = [];
 
@@ -52,95 +55,114 @@ if (isMainThread) {
 } else {
   // Worker code
   if (parentPort) {
-    const { start, end, threadId, mode } = workerData;
-    let key = start;
-    let cont = 0;
-    const startTime = Date.now();
-    const rangeSize = end - start + 1n;
-    const privBuf = Buffer.alloc(32);
-    const ONE_BUF = Buffer.alloc(32); ONE_BUF[31] = 1;
-
-    const bitLen = rangeSize.toString(2).length;
-    const rByteLen = Math.ceil(bitLen / 8);
-    const topByteMask = bitLen % 8 === 0 ? 0xff : (1 << (bitLen % 8)) - 1;
-    const RAND_BATCH = 4096;
-    let randPool = crypto.randomBytes(RAND_BATCH);
-    let randPos = 0;
-
-    function nextRandomKey() {
-      while (true) {
-        if (randPos + rByteLen > RAND_BATCH) {
-          randPool = crypto.randomBytes(RAND_BATCH);
-          randPos = 0;
-        }
-        let r = BigInt(randPool[randPos] & topByteMask);
-        for (let j = 1; j < rByteLen; j++) r = (r << 8n) | BigInt(randPool[randPos + j]);
-        randPos += rByteLen;
-        if (r < rangeSize) return start + r;
-      }
-    }
-
-    if (mode === 2) key = nextRandomKey();
-    writeBigInt32BE(key, privBuf);
-    let pub = secp.publicKeyCreate(privBuf, true);
-
-    while (true) {
-      cont++;
-
-      const sha = crypto.createHash('sha256').update(pub).digest();
-      const rip = crypto.createHash('ripemd160').update(sha).digest();
-      const hash160 = rip.toString('hex');
-
-      if (wallets.has(hash160)) {
-        const pkey = key.toString(16).padStart(64, '0');
-        const publicAddr = hash160ToAddress(rip);
-        const wif = privToWIF(privBuf);
-        parentPort.postMessage({
-          found: true,
-          threadId,
-          privKey: pkey,
-          wif,
-          publicAddr,
-        });
-        break;
-      }
-
-      if (cont % 1000 === 0) {
-        const elapsedTime = (Date.now() - startTime) / 1000;
-        const speed = cont / elapsedTime;
-        const Hs = formatHashrate(speed);
-        const checked = Number((key - start) * 10000n / rangeSize) / 100;
-        const pkey = key.toString(16).padStart(64, '0');
-        const publicAddr = hash160ToAddress(rip);
-
-        parentPort.postMessage({
-          found: false,
-          threadId,
-          log: `Thread ${threadId}: ${pkey} ${publicAddr} ${Hs} (${checked.toFixed(2)}% verificado)`,
-        });
-      }
-
-      if (mode === 1) {
-        // Sequencial: avança chave + ponto público por adição EC
-        key += 1n;
-        if (key > end) {
-          key = start;
-          writeBigInt32BE(key, privBuf);
-          pub = secp.publicKeyCreate(privBuf, true);
-        } else {
-          privBuf[31]++;
-          if (privBuf[31] === 0) writeBigInt32BE(key, privBuf);
-          pub = secp.publicKeyTweakAdd(pub, ONE_BUF, true);
-        }
-      } else {
-        // Aleatório: chave totalmente nova uniforme em [start,end] via CSPRNG
-        key = nextRandomKey();
-        writeBigInt32BE(key, privBuf);
-        pub = secp.publicKeyCreate(privBuf, true);
-      }
-    }
-    process.exit(0);
+    runWorker().catch((err) => {
+      console.error('Worker error:', err);
+      process.exit(1);
+    });
   }
+}
+
+async function runWorker() {
+  const { start, end, threadId, mode } = workerData;
+  let key = start;
+  let cont = 0;
+  const startTime = Date.now();
+  const rangeSize = end - start + 1n;
+  const privBuf = Buffer.alloc(32);
+  const ONE_BUF = Buffer.alloc(32); ONE_BUF[31] = 1;
+  const pubBufA = new Uint8Array(33);
+  const pubBufB = new Uint8Array(33);
+
+  const sha256Hw = await hashWasm.createSHA256();
+  const rip160Hw = await hashWasm.createRIPEMD160();
+
+  const bitLen = rangeSize.toString(2).length;
+  const rByteLen = Math.ceil(bitLen / 8);
+  const topByteMask = bitLen % 8 === 0 ? 0xff : (1 << (bitLen % 8)) - 1;
+  const RAND_BATCH = 4096;
+  let randPool = crypto.randomBytes(RAND_BATCH);
+  let randPos = 0;
+
+  function nextRandomKey() {
+    while (true) {
+      if (randPos + rByteLen > RAND_BATCH) {
+        randPool = crypto.randomBytes(RAND_BATCH);
+        randPos = 0;
+      }
+      let r = BigInt(randPool[randPos] & topByteMask);
+      for (let j = 1; j < rByteLen; j++) r = (r << 8n) | BigInt(randPool[randPos + j]);
+      randPos += rByteLen;
+      if (r < rangeSize) return start + r;
+    }
+  }
+
+  if (mode === 2) key = nextRandomKey();
+  writeBigInt32BE(key, privBuf);
+  let pub = secp.publicKeyCreate(privBuf, true, pubBufA);
+  let pubAlt = pubBufB;
+  let ticksLeft = LOG_EVERY;
+
+  while (true) {
+    cont++;
+
+    sha256Hw.init(); sha256Hw.update(pub);
+    const sha = sha256Hw.digest('binary');
+    rip160Hw.init(); rip160Hw.update(sha);
+    const rip = rip160Hw.digest('binary');
+    const hash160 = Buffer.from(rip).toString('hex');
+
+    if (wallets.has(hash160)) {
+      const pkey = key.toString(16).padStart(64, '0');
+      const publicAddr = hash160ToAddress(Buffer.from(rip));
+      const wif = privToWIF(privBuf);
+      parentPort.postMessage({
+        found: true,
+        threadId,
+        privKey: pkey,
+        wif,
+        publicAddr,
+      });
+      break;
+    }
+
+    if (--ticksLeft === 0) {
+      ticksLeft = LOG_EVERY;
+      const elapsedTime = (Date.now() - startTime) / 1000;
+      const speed = cont / elapsedTime;
+      const Hs = formatHashrate(speed);
+      const checked = Number((key - start) * 10000n / rangeSize) / 100;
+      const pkey = key.toString(16).padStart(64, '0');
+      const publicAddr = hash160ToAddress(Buffer.from(rip));
+
+      parentPort.postMessage({
+        found: false,
+        threadId,
+        log: `Thread ${threadId}: ${pkey} ${publicAddr} ${Hs} (${checked.toFixed(2)}% verificado)`,
+      });
+    }
+
+    if (mode === 1) {
+      // Sequencial: avança chave + ponto público por adição EC
+      key += 1n;
+      if (key > end) {
+        key = start;
+        writeBigInt32BE(key, privBuf);
+        pub = secp.publicKeyCreate(privBuf, true, pub);
+      } else {
+        privBuf[31]++;
+        if (privBuf[31] === 0) writeBigInt32BE(key, privBuf);
+        const next = secp.publicKeyTweakAdd(pub, ONE_BUF, true, pubAlt);
+        pubAlt = pub;
+        pub = next;
+      }
+    } else {
+      // Aleatório: chave totalmente nova uniforme em [start,end] via CSPRNG
+      key = nextRandomKey();
+      writeBigInt32BE(key, privBuf);
+      pub = secp.publicKeyCreate(privBuf, true, pub);
+    }
+  }
+  process.exit(0);
 }
 
 function startWorkers(puzzleNumber, mode, numThreads) {
