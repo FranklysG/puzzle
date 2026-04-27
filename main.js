@@ -1,10 +1,12 @@
 const { Worker, isMainThread, workerData, parentPort } = require('worker_threads');
 const os = require('os');
-const CoinKey = require('coinkey');
+const crypto = require('crypto');
+const secp = require('secp256k1');
+const bs58check = require('bs58check').default;
 const readline = require('readline');
 const fs = require('fs');
 
-const wallets = require('./utils/wallets'); // Lista de endereços alvo
+const wallets = require('./utils/wallets'); // Set de hash160 hex
 const ranges = require('./utils/ranges');   // Ranges por puzzle
 
 let threadLogs = [];
@@ -55,20 +57,50 @@ if (isMainThread) {
     let cont = 0;
     const startTime = Date.now();
     const rangeSize = end - start + 1n;
+    const privBuf = Buffer.alloc(32);
+    const ONE_BUF = Buffer.alloc(32); ONE_BUF[31] = 1;
+
+    const bitLen = rangeSize.toString(2).length;
+    const rByteLen = Math.ceil(bitLen / 8);
+    const topByteMask = bitLen % 8 === 0 ? 0xff : (1 << (bitLen % 8)) - 1;
+    const RAND_BATCH = 4096;
+    let randPool = crypto.randomBytes(RAND_BATCH);
+    let randPos = 0;
+
+    function nextRandomKey() {
+      while (true) {
+        if (randPos + rByteLen > RAND_BATCH) {
+          randPool = crypto.randomBytes(RAND_BATCH);
+          randPos = 0;
+        }
+        let r = BigInt(randPool[randPos] & topByteMask);
+        for (let j = 1; j < rByteLen; j++) r = (r << 8n) | BigInt(randPool[randPos + j]);
+        randPos += rByteLen;
+        if (r < rangeSize) return start + r;
+      }
+    }
+
+    if (mode === 2) key = nextRandomKey();
+    writeBigInt32BE(key, privBuf);
+    let pub = secp.publicKeyCreate(privBuf, true);
 
     while (true) {
       cont++;
 
-      const pkey = key.toString(16).padStart(64, '0');
-      const publicAddr = generatePublicKey(pkey);
+      const sha = crypto.createHash('sha256').update(pub).digest();
+      const rip = crypto.createHash('ripemd160').update(sha).digest();
+      const hash160 = rip.toString('hex');
 
-      if (wallets.includes(publicAddr)) {
-        const wif = generateWIF(pkey);
+      if (wallets.has(hash160)) {
+        const pkey = key.toString(16).padStart(64, '0');
+        const publicAddr = hash160ToAddress(rip);
+        const wif = privToWIF(privBuf);
         parentPort.postMessage({
           found: true,
           threadId,
           privKey: pkey,
           wif,
+          publicAddr,
         });
         break;
       }
@@ -78,6 +110,8 @@ if (isMainThread) {
         const speed = cont / elapsedTime;
         const Hs = formatHashrate(speed);
         const checked = Number((key - start) * 10000n / rangeSize) / 100;
+        const pkey = key.toString(16).padStart(64, '0');
+        const publicAddr = hash160ToAddress(rip);
 
         parentPort.postMessage({
           found: false,
@@ -87,21 +121,22 @@ if (isMainThread) {
       }
 
       if (mode === 1) {
-        // Sequencial
+        // Sequencial: avança chave + ponto público por adição EC
         key += 1n;
         if (key > end) {
-          key = start; // Volta ao início do range
+          key = start;
+          writeBigInt32BE(key, privBuf);
+          pub = secp.publicKeyCreate(privBuf, true);
+        } else {
+          privBuf[31]++;
+          if (privBuf[31] === 0) writeBigInt32BE(key, privBuf);
+          pub = secp.publicKeyTweakAdd(pub, ONE_BUF, true);
         }
       } else {
-        // Aleatório
-        const MAX_SAFE = Number.MAX_SAFE_INTEGER;
-        const maxStep = rangeSize > BigInt(MAX_SAFE) ? MAX_SAFE : Number(rangeSize);
-        const step = BigInt(Math.floor(Math.random() * maxStep) + 1);
-        key += step;
-        if (key > end) {
-          key = start + (key - end - 1n); // Continua "loopando" no range
-          if (key > end) key = start;
-        }
+        // Aleatório: chave totalmente nova uniforme em [start,end] via CSPRNG
+        key = nextRandomKey();
+        writeBigInt32BE(key, privBuf);
+        pub = secp.publicKeyCreate(privBuf, true);
       }
     }
     process.exit(0);
@@ -130,9 +165,14 @@ function startWorkers(puzzleNumber, mode, numThreads) {
   }
 
   for (let i = 0; i < numThreads; i++) {
-    const start = min + BigInt(i) * baseChunkSize;
-    let end = start + baseChunkSize - 1n;
-    if (i === numThreads - 1) {
+    let start, end;
+    if (mode === 1) {
+      start = min + BigInt(i) * baseChunkSize;
+      end = i === numThreads - 1 ? max : start + baseChunkSize - 1n;
+    } else {
+      // Aleatório: cada thread amostra o range inteiro (cobertura agregada melhor;
+      // colisão entre threads é desprezível em ranges grandes)
+      start = min;
       end = max;
     }
 
@@ -179,15 +219,22 @@ function updateLogs() {
   }
 }
 
-function generatePublicKey(privatekey) {
-  const key = new CoinKey(Buffer.from(privatekey, 'hex'));
-  key.compressed = true;
-  return key.publicAddress;
+function writeBigInt32BE(value, buf) {
+  let v = value;
+  for (let i = 31; i >= 0; i--) {
+    buf[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
 }
 
-function generateWIF(privateKey) {
-  const key = new CoinKey(Buffer.from(privateKey, 'hex'));
-  return key.privateWif;
+function hash160ToAddress(rip) {
+  const payload = Buffer.concat([Buffer.from([0x00]), rip]);
+  return bs58check.encode(payload);
+}
+
+function privToWIF(privBuf) {
+  const payload = Buffer.concat([Buffer.from([0x80]), privBuf, Buffer.from([0x01])]);
+  return bs58check.encode(payload);
 }
 
 function formatHashrate(speed) {

@@ -17,9 +17,7 @@
   },
   "homepage": "https://github.com/FranklysG/puzzle#readme",
   "dependencies": {
-    "bitcoinjs-lib": "^6.1.7",
-    "coinkey": "^3.0.0",
-    "elliptic": "^6.6.1",
-    "fs": "^0.0.1-security"
+    "bs58check": "^4.0.0",
+    "secp256k1": "^5.0.1"
   }
 }

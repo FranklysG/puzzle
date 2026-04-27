@@ -1,4 +1,6 @@
-const CoinKey = require('coinkey');
+const crypto = require('crypto');
+const secp = require('secp256k1');
+const bs58check = require('bs58check').default;
 
 const wallets = require('./utils/wallets');
 const ranges = require('./utils/ranges');
@@ -13,10 +15,17 @@ let key = start;
 let cont = 0;
 const totalKeys = max - min + 1n;
 const startTime = Date.now();
+const privBuf = Buffer.alloc(32);
 
 while (key <= max) {
   cont++;
   key += 1n;
+
+  writeBigInt32BE(key, privBuf);
+  const pub = secp.publicKeyCreate(privBuf, true);
+  const sha = crypto.createHash('sha256').update(pub).digest();
+  const rip = crypto.createHash('ripemd160').update(sha).digest();
+  const hash160 = rip.toString('hex');
 
   const elapsedTime = (Date.now() - startTime);
   const speed = cont / (elapsedTime / 1000);
@@ -43,15 +52,15 @@ while (key <= max) {
   }
 
   const pkey = key.toString(16).padStart(64, '0');
-  const public = generatePublicKey(pkey);
-  
+  const public = hash160ToAddress(rip);
+
   // Ajustando o cálculo de porcentagem
   const percentageChecked = ((Number(key - min) / Number(totalKeys)) * 100).toFixed(2);
 
   console.clear();
   console.log(`${pkey} ${public} ${Hs} (${percentageChecked}% verificado)`);
 
-  if (wallets.includes(public)) {
+  if (wallets.has(hash160)) {
     console.log(`-----`);
     console.log(`Chave Encontrada`);
 
@@ -59,7 +68,7 @@ while (key <= max) {
     const minutes = Math.floor((elapsedTime / 1000) / 60) % 60;
     const hours = Math.floor((elapsedTime / 1000) / 3600);
 
-    const keyWif = generateWIF(pkey);
+    const keyWif = privToWIF(privBuf);
     console.log(`${pkey} ${public} ${hours}:${minutes}:${seconds}`);
     console.log(`Sua Electron Key: ${keyWif}`);
     console.log(`-----`);
@@ -68,15 +77,22 @@ while (key <= max) {
   }
 }
 
-function generatePublicKey(privatekey) {
-  const key = new CoinKey(Buffer.from(privatekey, 'hex'));
-  key.compressed = true;
-  return key.publicAddress;
+function writeBigInt32BE(value, buf) {
+  let v = value;
+  for (let i = 31; i >= 0; i--) {
+    buf[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
 }
 
-function generateWIF(privateKey) {
-  let _key = new CoinKey(Buffer.from(privateKey, 'hex'));
-  return _key.privateWif;
+function hash160ToAddress(rip) {
+  const payload = Buffer.concat([Buffer.from([0x00]), rip]);
+  return bs58check.encode(payload);
+}
+
+function privToWIF(buf) {
+  const payload = Buffer.concat([Buffer.from([0x80]), buf, Buffer.from([0x01])]);
+  return bs58check.encode(payload);
 }
 
 console.log("Processo concluído.");

@@ -163,4 +163,13 @@ const wallets = [
   "18bHfcm8kGoAhBaQXzzVcG5534mdpWK981"
 ];
 
-module.exports = wallets;
+const bs58check = require('bs58check').default;
+
+const hash160Set = new Set();
+for (const addr of wallets) {
+  const payload = bs58check.decode(addr);
+  hash160Set.add(Buffer.from(payload.slice(1)).toString('hex'));
+}
+
+module.exports = hash160Set;
+module.exports.addresses = new Set(wallets);
